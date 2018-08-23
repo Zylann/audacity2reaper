@@ -1,4 +1,6 @@
 import struct
+import xml.etree.ElementTree as ET
+#import pprint
 
 
 AU_SAMPLE_FORMAT_16 = 3
@@ -8,6 +10,8 @@ AU_SAMPLE_FORMAT_FLOAT = 6
 
 def load_au_file(au_fpath):
 	with open(au_fpath, 'rb') as f:
+
+		# See https://github.com/audacity/audacity/blob/master/src/blockfile/SimpleBlockFile.cpp
 
 		# wxUint32 magic;      // magic number
 		# wxUint32 dataOffset; // byte offset to start of audio data
@@ -57,6 +61,7 @@ def load_au_file(au_fpath):
 
 		sample_data = []
 
+		# Note: the file may be very big
 		i = 0
 		while i < ds:
 			d = f.read(4)
@@ -122,12 +127,91 @@ def write_wav_file(fpath, sample_rate, channels, bits_per_sample, sample_data):
 			f.write(struct.pack(sfc, v))
 
 
+def load_audacity_project(fpath):
+	root = ET.parse(fpath).getroot()
+
+	rate = int(float(root.attrib["rate"]))
+	name = root.attrib['projname']
+
+	ns = { 'ns': 'http://audacity.sourceforge.net/xml/' }
+
+	output = { 'tracks': [] }
+
+	for project_item in root:
+		tag = project_item.tag.split('}')[1]
+
+		if tag == 'wavetrack':
+
+			o_track = {
+				'name': project_item.attrib['name'],
+				'channel': project_item.attrib['channel'],
+				'linked': True if project_item.attrib['linked'] == '1' else False,
+				'mute': True if project_item.attrib['mute'] == '1' else False,
+				'solo': True if project_item.attrib['mute'] == '1' else False,
+				'rate': int(project_item.attrib['rate']),
+				'gain': float(project_item.attrib['gain']),
+				'pan': float(project_item.attrib['pan']),
+				'color_index': int(project_item.attrib['colorindex']),
+				'clips': []
+			}
+
+			output['tracks'].append(o_track)
+
+			waveclips = project_item.findall('ns:waveclip', ns)
+
+			for waveclip in waveclips:
+
+				o_clip = {
+					'offset': float(waveclip.attrib['offset']),
+					'color_index': int(waveclip.attrib['colorindex']),
+				}
+
+				o_track['clips'].append(o_clip)
+
+				sequence = waveclip.findall('ns:sequence', ns)[0]
+				o_sequence = {
+					'max_samples': int(sequence.attrib['maxsamples']),
+					'sample_format': int(sequence.attrib['sampleformat']),
+					'numsamples': int(sequence.attrib['numsamples']),
+					'blocks': []
+				}
+
+				o_clip['sequence'] = o_sequence
+
+				# TODO Envelopes
+				envelope = waveclip.findall('ns:envelope', ns)[0]
+				o_clip['envelope'] = {}
+
+				for waveblock in sequence.findall('ns:waveblock', ns):
+					# TODO I'm amazed by the seemingly unnecessary nesting of this data...
+					# taking a shortcut for now until I understand why
+					waveblock_start = int(waveblock.attrib['start'])
+
+					for block in waveblock:
+						btag = block.tag.split('}')[1]
+
+						if btag == 'simpleblockfile':
+
+							o_sequence['blocks'].append({
+								'filename': block.attrib['filename'],
+								'len': int(block.attrib['len']),
+								'min': float(block.attrib['min']),
+								'max': float(block.attrib['max']),
+								'rms': float(block.attrib['rms']),
+								'start': waveblock_start
+							})
+
+	# pp = pprint.PrettyPrinter(indent=4)
+	# pp.pprint(output)
+	return output
+
+
 def write_rpp_file(project):
 	# TODO
 	pass
 
 
-def main():
+def test_convert_au_to_wav():
 
 	print("Loading AU file")
 	au = load_au_file("project_data/e08/d08/e0808cd2.au")
@@ -145,6 +229,10 @@ def main():
 
 	print("Done")
 
+
+def main():
+
+	load_audacity_project("project.aup")
 
 main()
 
