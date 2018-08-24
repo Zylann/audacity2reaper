@@ -1,4 +1,6 @@
 *.au
-*.rpp
 *.aup
+*.rpp
+*.rpp-bak
 *.wav
+*.reapeaks
