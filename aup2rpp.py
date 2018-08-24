@@ -219,76 +219,92 @@ def write_rpp_file_from_audacity_project(fpath, project):
 	# One nice thing about Reaper projects is that you can omit things in it,
 	# it will not complain and just load what it finds, apparently
 
-	indent_unit = "  "
+	audacity_color_to_peakcol = [
+		0, # 0: Default color in Audacity (blue)
+		0x013333ff, # 1: Red
+		0x0133ff33, # 2: Green
+		0x01222222 # 3: Black
+	]
 
-	def b2i(b):
-		return 1 if b else 0
+	class RppWriter:
+		def __init__(self, f):
+			self.indent_unit = "  "
+			self.indent = ""
+			self.f = f
 
-	def audacity_color_to_peakcol(c):
-		if c == 0: # Default color in Audacity (blue)
-			return 0
-		if c == 1: # Red
-			return 0x013333ff
-		if c == 2: # Green
-			return 0x0133ff33
-		if c == 3: # Black
-			return 0x01222222
+		def open_block(self, tag, *args):
+			self.f.write('{0}<{1}'.format(self.indent, tag))
+			self._args(args)
+			self.indent += self.indent_unit
 
-	def generate_uid():
-		return '{' + str(uuid.uuid4()).upper() + '}'
+		def close_block(self):
+			self.indent = self.indent[:-len(self.indent_unit)]
+			self.f.write('{0}>\n'.format(self.indent))
+
+		def line(self, tag, *args):
+			self.f.write('{0}{1}'.format(self.indent, tag))
+			self._args(args)
+
+		def _args(self, args):
+			for v in args:
+				if type(v) == str:
+					s = ' "{0}"'# if v.contains(' ') else ' {0}'
+					self.f.write(s.format(v))
+				elif type(v) == bool:
+					self.f.write(' {0}'.format(1 if v else 0))
+				elif type(v) == uuid.UUID:
+					self.f.write(' {' + str(v).upper() + '}')
+				else:
+					self.f.write(' ' + str(v))
+			self.f.write('\n')
 
 	with open(fpath, 'w', encoding="utf-8") as f:
-		f.write('<REAPER_PROJECT 0.1 \"5.92/x64\" 1534982487\n')
-		indent = indent_unit
+		w = RppWriter(f)
+
+		w.open_block('REAPER_PROJECT', 0.1, '5.92/x64', 1534982487)
 
 		project_samplerate = int(project['rate'])
-		f.write('{0}SAMPLERATE {1} 0 0\n'.format(indent, project_samplerate))
+		w.line('SAMPLERATE', project_samplerate, 0, 0)
 
 		for track in project['tracks']:
 
-			track_uid = generate_uid()
+			track_uid = uuid.uuid4()
 
-			f.write('{0}<TRACK {1}\n'.format(indent, track_uid))
-			indent += indent_unit
+			w.open_block('TRACK', track_uid)
 
-			f.write('{0}NAME "{1}"\n'.format(indent, track['name']))
-			f.write('{0}TRACKID {1}\n'.format(indent, track_uid))
-			f.write('{0}VOLPAN {1} {2} -1 -1 1\n'.format(indent, track['gain'], track['pan']))
-			f.write('{0}NCHAN {1}\n'.format(indent, track['channel']))
-			f.write('{0}MUTESOLO {1} {2} 0\n'.format(indent, b2i(track['mute']), b2i(track['solo'])))
-			f.write('{0}PEAKCOL {1}\n'.format(indent, audacity_color_to_peakcol(track['color_index'])))
+			w.line('NAME', track['name'])
+			w.line('TRACKID', track_uid)
+			w.line('VOLPAN', track['gain'], track['pan'], -1, -1, 1)
+			w.line('NCHAN', 2)
+			w.line('MUTESOLO', track['mute'], track['solo'])
+			w.line('PEAKCOL', audacity_color_to_peakcol[track['color_index']])
 
 			for clip in track['clips']:
-				f.write('{0}<ITEM\n'.format(indent))
-				indent += indent_unit
 
-				f.write('{0}POSITION {1}\n'.format(indent, clip['offset']))
-				f.write('{0}IGUID {1}\n'.format(indent, generate_uid()))
-				f.write('{0}GUID {1}\n'.format(indent, generate_uid()))
+				w.open_block('ITEM')
+
+				w.line('POSITION', clip['offset'])
+				# TODO I don't know what these UIDs are
+				w.line('IGUID', uuid.uuid4())
+				w.line('GUID', uuid.uuid4())
 				# TODO Take name from audio file
-				f.write('{0}NAME "{1}"\n'.format(indent, ""))
+				w.line('NAME', "")
 
 				nsamples = clip['sequence']['numsamples']
 				item_len_seconds = nsamples / project_samplerate
-				f.write('{0}LENGTH "{1}"\n'.format(indent, item_len_seconds))
+
+				w.line('LENGTH', item_len_seconds)
 
 				# TODO Actually implement source
-				f.write('{0}<SOURCE WAV\n'.format(indent))
-				f.write('{0}{1}FILE "{2}"\n'.format(indent, indent_unit, "todo.wav"))
-				f.write(indent)
-				f.write('>\n')
+				w.open_block('SOURCE WAVE')
+				w.line('FILE', "todo.wav")
+				w.close_block()
 
-				indent = indent[:-len(indent_unit)]
+				w.close_block()
 
-				f.write(indent)
-				f.write('>\n')
+			w.close_block()
 
-			indent = indent[:-len(indent_unit)]
-
-			f.write(indent)
-			f.write('>\n')
-
-		f.write('>')
+		w.close_block()
 
 
 def test_convert_au_to_wav():
