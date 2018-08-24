@@ -1,6 +1,8 @@
 import struct
 import xml.etree.ElementTree as ET
-#import pprint
+import uuid
+import math
+import pprint
 
 
 AU_SAMPLE_FORMAT_16 = 3
@@ -135,7 +137,11 @@ def load_audacity_project(fpath):
 
 	ns = { 'ns': 'http://audacity.sourceforge.net/xml/' }
 
-	output = { 'tracks': [] }
+	output = {
+		'rate': rate,
+		'name': name,
+		'tracks': []
+	}
 
 	for project_item in root:
 		tag = project_item.tag.split('}')[1]
@@ -147,7 +153,7 @@ def load_audacity_project(fpath):
 				'channel': project_item.attrib['channel'],
 				'linked': True if project_item.attrib['linked'] == '1' else False,
 				'mute': True if project_item.attrib['mute'] == '1' else False,
-				'solo': True if project_item.attrib['mute'] == '1' else False,
+				'solo': True if project_item.attrib['solo'] == '1' else False,
 				'rate': int(project_item.attrib['rate']),
 				'gain': float(project_item.attrib['gain']),
 				'pan': float(project_item.attrib['pan']),
@@ -201,14 +207,88 @@ def load_audacity_project(fpath):
 								'start': waveblock_start
 							})
 
-	# pp = pprint.PrettyPrinter(indent=4)
-	# pp.pprint(output)
 	return output
 
 
-def write_rpp_file(project):
-	# TODO
-	pass
+# Audacity saves gain as a linear value, and it turns out Reaper also does
+# def linear2db(p_linear)
+# 	return math.log(p_linear) * 8.6858896380650365530225783783321
+
+
+def write_rpp_file_from_audacity_project(fpath, project):
+	# One nice thing about Reaper projects is that you can omit things in it,
+	# it will not complain and just load what it finds, apparently
+
+	indent_unit = "  "
+
+	def b2i(b):
+		return 1 if b else 0
+
+	def audacity_color_to_peakcol(c):
+		if c == 0: # Default color in Audacity (blue)
+			return 0
+		if c == 1: # Red
+			return 0x013333ff
+		if c == 2: # Green
+			return 0x0133ff33
+		if c == 3: # Black
+			return 0x01222222
+
+	def generate_uid():
+		return '{' + str(uuid.uuid4()).upper() + '}'
+
+	with open(fpath, 'w', encoding="utf-8") as f:
+		f.write('<REAPER_PROJECT 0.1 \"5.92/x64\" 1534982487\n')
+		indent = indent_unit
+
+		project_samplerate = int(project['rate'])
+		f.write('{0}SAMPLERATE {1} 0 0\n'.format(indent, project_samplerate))
+
+		for track in project['tracks']:
+
+			track_uid = generate_uid()
+
+			f.write('{0}<TRACK {1}\n'.format(indent, track_uid))
+			indent += indent_unit
+
+			f.write('{0}NAME "{1}"\n'.format(indent, track['name']))
+			f.write('{0}TRACKID {1}\n'.format(indent, track_uid))
+			f.write('{0}VOLPAN {1} {2} -1 -1 1\n'.format(indent, track['gain'], track['pan']))
+			f.write('{0}NCHAN {1}\n'.format(indent, track['channel']))
+			f.write('{0}MUTESOLO {1} {2} 0\n'.format(indent, b2i(track['mute']), b2i(track['solo'])))
+			f.write('{0}PEAKCOL {1}\n'.format(indent, audacity_color_to_peakcol(track['color_index'])))
+
+			for clip in track['clips']:
+				f.write('{0}<ITEM\n'.format(indent))
+				indent += indent_unit
+
+				f.write('{0}POSITION {1}\n'.format(indent, clip['offset']))
+				f.write('{0}IGUID {1}\n'.format(indent, generate_uid()))
+				f.write('{0}GUID {1}\n'.format(indent, generate_uid()))
+				# TODO Take name from audio file
+				f.write('{0}NAME "{1}"\n'.format(indent, ""))
+
+				nsamples = clip['sequence']['numsamples']
+				item_len_seconds = nsamples / project_samplerate
+				f.write('{0}LENGTH "{1}"\n'.format(indent, item_len_seconds))
+
+				# TODO Actually implement source
+				f.write('{0}<SOURCE WAV\n'.format(indent))
+				f.write('{0}{1}FILE "{2}"\n'.format(indent, indent_unit, "todo.wav"))
+				f.write(indent)
+				f.write('>\n')
+
+				indent = indent[:-len(indent_unit)]
+
+				f.write(indent)
+				f.write('>\n')
+
+			indent = indent[:-len(indent_unit)]
+
+			f.write(indent)
+			f.write('>\n')
+
+		f.write('>')
 
 
 def test_convert_au_to_wav():
@@ -232,7 +312,10 @@ def test_convert_au_to_wav():
 
 def main():
 
-	load_audacity_project("project.aup")
+	project = load_audacity_project("project.aup")
+	# pp = pprint.PrettyPrinter(indent=4)
+	# pp.pprint(project)
+	write_rpp_file_from_audacity_project("project.rpp", project)
 
 main()
 
