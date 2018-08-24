@@ -3,6 +3,7 @@ import xml.etree.ElementTree as ET
 import uuid
 import math
 import pprint
+import os
 
 
 AU_SAMPLE_FORMAT_16 = 3
@@ -34,7 +35,7 @@ def load_au_file(au_fpath):
 			'channels': hdata[5]
 		}
 
-		print(result)
+		#print(result)
 
 		if result['magic'] == 0x2e736e64:
 			encoding = result['encoding']
@@ -129,6 +130,20 @@ def write_wav_file(fpath, sample_rate, channels, bits_per_sample, sample_data):
 			f.write(struct.pack(sfc, v))
 
 
+def convert_au_to_wav(src_path, dst_path):
+
+	au = load_au_file(src_path)
+
+	samples = au['sample_data']
+
+	if au['encoding'] == AU_SAMPLE_FORMAT_FLOAT:
+		for i, v in enumerate(samples):
+			# We want 16-bit PCM
+			samples[i] = int(v * 32767.0)
+
+	write_wav_file(dst_path, au['sample_rate'], au['channels'], 16, samples)
+
+
 def load_audacity_project(fpath):
 	root = ET.parse(fpath).getroot()
 
@@ -137,9 +152,14 @@ def load_audacity_project(fpath):
 
 	ns = { 'ns': 'http://audacity.sourceforge.net/xml/' }
 
+	data_dir = os.path.splitext(fpath)[0] + '_data'
+	if not os.path.isdir(data_dir):
+		data_dir = ""
+
 	output = {
 		'rate': rate,
 		'name': name,
+		'data_dir': data_dir,
 		'tracks': []
 	}
 
@@ -204,20 +224,58 @@ def load_audacity_project(fpath):
 								'min': float(block.attrib['min']),
 								'max': float(block.attrib['max']),
 								'rms': float(block.attrib['rms']),
+								'type': btag,
 								'start': waveblock_start
 							})
+
+						# TODO Support alias blocks (file references)
 
 	return output
 
 
-# Audacity saves gain as a linear value, and it turns out Reaper also does
-# def linear2db(p_linear)
-# 	return math.log(p_linear) * 8.6858896380650365530225783783321
+def convert_au_files_from_audacity_project(project, target_dir):
+
+	if project['data_dir'] == "":
+		# No data
+		return
+
+	indexed_files = {}
+	for root, dirs, files in os.walk(project['data_dir']):
+		for name in files:
+			indexed_files[name] = os.path.join(root, name)
+
+	if not os.path.isdir(target_dir):
+		os.makedirs(target_dir)
+
+	for track in project['tracks']:
+		for clip in track['clips']:
+
+			sequence = clip['sequence']
+
+			if len(sequence['blocks']) > 1:
+				print("ERROR: Multi-block clips are not entirely supported yet")
+
+			for block in sequence['blocks']:
+				if block['type'] == 'simpleblockfile':
+					# This is mostly because I assume this rather than knowing it
+					assert block['filename'].endswith('.au')
+
+					src_fpath = indexed_files[block['filename']]
+
+					dst_fname = os.path.splitext(os.path.basename(src_fpath))[0] + '.wav'
+					dst_fpath = os.path.join(target_dir, dst_fname)
+					
+					if os.path.isfile(dst_fpath):
+						print("Overwriting ", dst_fpath)
+
+					convert_au_to_wav(src_fpath, dst_fpath)
+
+					# TODO We may want to concatenate blocks, for now we consider just one
+					if 'filename' not in clip:
+						clip['filename'] = dst_fpath
 
 
 def write_rpp_file_from_audacity_project(fpath, project):
-	# One nice thing about Reaper projects is that you can omit things in it,
-	# it will not complain and just load what it finds, apparently
 
 	audacity_color_to_peakcol = [
 		0, # 0: Default color in Audacity (blue)
@@ -225,6 +283,18 @@ def write_rpp_file_from_audacity_project(fpath, project):
 		0x0133ff33, # 2: Green
 		0x01222222 # 3: Black
 	]
+
+	def get_file_tag(fname):
+		ext = os.path.splitext(fname)[1]
+		if ext == '.wav':
+			return 'WAVE'
+		elif ext == 'ogg':
+			return 'VORBIS'
+		return ext[1:].upper()
+
+	# Audacity saves gain as a linear value, and it turns out Reaper also does
+	# def linear2db(p_linear)
+	# 	return math.log(p_linear) * 8.6858896380650365530225783783321
 
 	class RppWriter:
 		def __init__(self, f):
@@ -258,9 +328,14 @@ def write_rpp_file_from_audacity_project(fpath, project):
 					self.f.write(' ' + str(v))
 			self.f.write('\n')
 
+	# One nice thing about Reaper projects is that you can omit things in it,
+	# it will not complain and just load what it finds, apparently
+
 	with open(fpath, 'w', encoding="utf-8") as f:
 		w = RppWriter(f)
 
+		# Arbitrary version, which happens to be mine at time of writing.
+		# TODO I don't know what the number at the end is
 		w.open_block('REAPER_PROJECT', 0.1, '5.92/x64', 1534982487)
 
 		project_samplerate = int(project['rate'])
@@ -294,11 +369,23 @@ def write_rpp_file_from_audacity_project(fpath, project):
 				item_len_seconds = nsamples / project_samplerate
 
 				w.line('LENGTH', item_len_seconds)
-
-				# TODO Actually implement source
-				w.open_block('SOURCE WAVE')
-				w.line('FILE', "todo.wav")
+				
+				w.open_block('SOURCE ' + get_file_tag(clip['filename']))
+				# Note: the filename at clip-level is obtained at an earlier conversion stage,
+				# because usually Audacity stores audio as blocks which are later concatenated.
+				# Reaper doesn't need this, so it's handy to take care of that before.
+				w.line('FILE', clip['filename'])
 				w.close_block()
+
+				# Note: sources like this can exist:
+				# <SOURCE SECTION
+				#   LENGTH 3.55565072008221
+				#   STARTPOS 7.40378238649376
+				#   OVERLAP 0.01
+				#   <SOURCE FLAC
+				#     FILE "D:\PROJETS\AUDIO\coproductions\1287\Episodes\Episode 7\foule_armee.flac"
+				#   >
+				# >
 
 				w.close_block()
 
@@ -307,30 +394,14 @@ def write_rpp_file_from_audacity_project(fpath, project):
 		w.close_block()
 
 
-def test_convert_au_to_wav():
-
-	print("Loading AU file")
-	au = load_au_file("project_data/e08/d08/e0808cd2.au")
-
-	samples = au['sample_data']
-
-	if au['encoding'] == AU_SAMPLE_FORMAT_FLOAT:
-		print("Converting data")
-		for i, v in enumerate(samples):
-			# We want 16-bit PCM
-			samples[i] = int(v * 32767.0)
-
-	print("Saving WAV file")
-	write_wav_file("output.wav", au['sample_rate'], au['channels'], 16, samples)
-
-	print("Done")
-
-
 def main():
 
 	project = load_audacity_project("project.aup")
-	# pp = pprint.PrettyPrinter(indent=4)
-	# pp.pprint(project)
+	#pp = pprint.PrettyPrinter(indent=4)
+	#pp.pprint(project)
+
+	convert_au_files_from_audacity_project(project, "WaveData")
+
 	write_rpp_file_from_audacity_project("project.rpp", project)
 
 main()
