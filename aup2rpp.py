@@ -82,13 +82,46 @@ def load_au_file(au_fpath):
 	return result
 
 
-def write_wav_file(fpath, sample_rate, channels, bits_per_sample, sample_data):
+class WavWriter:
+	def __init__(self, f, sample_rate, channels, bits_per_sample):
+		self.f = f
+		self.sample_rate = sample_rate
+		self.channels = channels
+		self.bits_per_sample = bits_per_sample
 
-	data_chunk_size = len(sample_data) * bits_per_sample // 8
-	fmt_chunk_size = 2 + 2 + 4 + 4 + 2 + 2
-	riff_chunk_size = 4 + (8 + fmt_chunk_size) + (8 + data_chunk_size)
+		self.finalized = False
+		self.samples_count = 0
 
-	with open(fpath, 'wb') as f:
+		self.fmt_chunk_size = 2 + 2 + 4 + 4 + 2 + 2
+		self.riff_chunk_size_without_data = 4 + (8 + self.fmt_chunk_size) + 8
+
+		self.initial_fpos = f.tell()
+
+		# Leave blank header size, we'll write it once all data has been written.
+		# Go straight to the offset where we will write samples
+		f.write(bytearray(self.riff_chunk_size_without_data))
+
+		self.data_fpos = f.tell()
+
+	def append_samples(self, sample_data):
+		assert not self.finalized
+		
+		sfc = 'h'
+		if self.bits_per_sample == 32:
+			sfc = 'i'
+		for v in sample_data:
+			self.f.write(struct.pack(sfc, v))
+
+		self.samples_count += len(sample_data)
+
+	def finalize(self):
+		f = self.f
+
+		data_chunk_size = f.tell() - self.data_fpos
+		f.seek(self.initial_fpos)
+
+		assert data_chunk_size == (self.samples_count * self.bits_per_sample // 8)
+		riff_chunk_size = 4 + (8 + self.fmt_chunk_size) + (8 + data_chunk_size)
 
 		f.write(b'RIFF')
 		f.write(struct.pack('I', riff_chunk_size))
@@ -99,49 +132,66 @@ def write_wav_file(fpath, sample_rate, channels, bits_per_sample, sample_data):
 
 		# ----------
 		f.write(b'fmt ')
-		f.write(struct.pack('I', fmt_chunk_size))
+		f.write(struct.pack('I', self.fmt_chunk_size))
 
 		# Format
 		# PCM = 1 (i.e. Linear quantization) Values other than 1 indicate some form of compression.
 		f.write(struct.pack('H', 1))
 
-		f.write(struct.pack('H', channels))
+		f.write(struct.pack('H', self.channels))
 
-		f.write(struct.pack('I', sample_rate))
+		f.write(struct.pack('I', self.sample_rate))
 
 		# SampleRate * NumChannels * BitsPerSample/8
-		byte_rate = sample_rate * channels * bits_per_sample // 8
+		byte_rate = self.sample_rate * self.channels * self.bits_per_sample // 8
 		f.write(struct.pack('I', byte_rate))
 
 		# NumChannels * BitsPerSample/8
-		block_align = channels * bits_per_sample // 8
+		block_align = self.channels * self.bits_per_sample // 8
 		f.write(struct.pack('H', block_align))
 
 		# 8 bits = 8, 16 bits = 16, etc.
-		f.write(struct.pack('H', bits_per_sample))
+		f.write(struct.pack('H', self.bits_per_sample))
 
-		# ----------
 		f.write(b'data')
 		f.write(struct.pack('I', data_chunk_size))
-		sfc = 'h'
-		if bits_per_sample == 32:
-			sfc = 'i'
-		for v in sample_data:
-			f.write(struct.pack(sfc, v))
+		# And what follows is what we wrote before
+
+		self.finalized = True
 
 
-def convert_au_to_wav(src_path, dst_path):
+# Legacy shortcut
+# def write_wav_file(fpath, sample_rate, channels, bits_per_sample, sample_data):
+# 	with open(fpath, 'wb') as f:
+# 		w = WavWriter(f, sample_rate, channels, bits_per_sample)
+# 		w.append_samples(sample_data)
+# 		w.finalize()
 
-	au = load_au_file(src_path)
 
-	samples = au['sample_data']
+def convert_au_files_to_wav(src_paths, dst_path):
+	if len(src_paths) == 0:
+		return
+	print("Converting blocks ", src_paths)
+	# Concatenate a bunch of .au block files into a single WAV file
+	with open(dst_path, 'wb') as f:
+		w = None
+		for src_path in src_paths:
 
-	if au['encoding'] == AU_SAMPLE_FORMAT_FLOAT:
-		for i, v in enumerate(samples):
-			# We want 16-bit PCM
-			samples[i] = int(v * 32767.0)
+			au = load_au_file(src_path)
 
-	write_wav_file(dst_path, au['sample_rate'], au['channels'], 16, samples)
+			samples = au['sample_data']
+
+			if au['encoding'] == AU_SAMPLE_FORMAT_FLOAT:
+				for i, v in enumerate(samples):
+					# We want 16-bit PCM
+					samples[i] = int(v * 32767.0)
+
+			if w is None:
+				w = WavWriter(f, au['sample_rate'], au['channels'], 16)
+
+			w.append_samples(samples)
+
+		w.finalize()
 
 
 def load_audacity_project(fpath):
@@ -228,6 +278,16 @@ def load_audacity_project(fpath):
 								'start': waveblock_start
 							})
 
+						elif btag == 'silentblockfile':
+
+							o_sequence['blocks'].append({
+								'len': int(block.attrib['len']),
+								'type': btag
+							})
+
+						else:
+							print("WARNING: Unknown block type: '{0}'".format(btag))
+
 						# TODO Support alias blocks (file references)
 
 	return output
@@ -247,32 +307,39 @@ def convert_au_files_from_audacity_project(project, target_dir):
 	if not os.path.isdir(target_dir):
 		os.makedirs(target_dir)
 
-	for track in project['tracks']:
-		for clip in track['clips']:
+	for track_index, track in enumerate(project['tracks']):
+		for clip_index, clip in enumerate(track['clips']):
 
 			sequence = clip['sequence']
+			sequence['numsamples_without_silence'] = sequence['numsamples']
 
-			if len(sequence['blocks']) > 1:
-				print("ERROR: Multi-block clips are not entirely supported yet")
+			dst_fname = "track{0}_clip{1}.wav".format(track_index, clip_index)
+			dst_fpath = os.path.join(target_dir, dst_fname)
 
-			for block in sequence['blocks']:
+			au_fpaths = []
+
+			for block_index, block in enumerate(sequence['blocks']):
+
 				if block['type'] == 'simpleblockfile':
 					# This is mostly because I assume this rather than knowing it
 					assert block['filename'].endswith('.au')
-
 					src_fpath = indexed_files[block['filename']]
+					au_fpaths.append(src_fpath)
 
-					dst_fname = os.path.splitext(os.path.basename(src_fpath))[0] + '.wav'
-					dst_fpath = os.path.join(target_dir, dst_fname)
-					
-					if os.path.isfile(dst_fpath):
-						print("Overwriting ", dst_fpath)
+				elif block['type'] == 'silentblockfile':
+					# Ignore
+					sequence['numsamples_without_silence'] -= block['len']
 
-					convert_au_to_wav(src_fpath, dst_fpath)
+				else:
+					print("WARNING: Unknown block type: '{0}'".format(block['type']))
 
-					# TODO We may want to concatenate blocks, for now we consider just one
-					if 'filename' not in clip:
-						clip['filename'] = dst_fpath
+			if len(au_fpaths) > 0:
+
+				if os.path.isfile(dst_fpath):
+					print("Overwriting ", dst_fpath)
+
+				convert_au_files_to_wav(au_fpaths, dst_fpath)
+				clip['filename'] = dst_fpath
 
 
 def write_rpp_file_from_audacity_project(fpath, project):
@@ -356,6 +423,13 @@ def write_rpp_file_from_audacity_project(fpath, project):
 
 			for clip in track['clips']:
 
+				# Note: the filename at clip-level is obtained at an earlier conversion stage,
+				# because usually Audacity stores audio as blocks which are later concatenated.
+				# Reaper doesn't need this, so it's handy to take care of that before.
+
+				if 'filename' not in clip:
+					continue
+
 				w.open_block('ITEM')
 
 				w.line('POSITION', clip['offset'])
@@ -365,15 +439,12 @@ def write_rpp_file_from_audacity_project(fpath, project):
 				# TODO Take name from audio file
 				w.line('NAME', "")
 
-				nsamples = clip['sequence']['numsamples']
+				nsamples = clip['sequence']['numsamples_without_silence']
 				item_len_seconds = nsamples / project_samplerate
 
 				w.line('LENGTH', item_len_seconds)
 				
 				w.open_block('SOURCE ' + get_file_tag(clip['filename']))
-				# Note: the filename at clip-level is obtained at an earlier conversion stage,
-				# because usually Audacity stores audio as blocks which are later concatenated.
-				# Reaper doesn't need this, so it's handy to take care of that before.
 				w.line('FILE', clip['filename'])
 				w.close_block()
 
@@ -396,13 +467,17 @@ def write_rpp_file_from_audacity_project(fpath, project):
 
 def main():
 
-	project = load_audacity_project("project.aup")
+	fpath = "1287.aup"
+
+	project = load_audacity_project(fpath)
 	#pp = pprint.PrettyPrinter(indent=4)
 	#pp.pprint(project)
 
-	convert_au_files_from_audacity_project(project, "WaveData")
+	data_dir = os.path.splitext(fpath)[0] + '_wav_data'
+	convert_au_files_from_audacity_project(project, data_dir)
 
-	write_rpp_file_from_audacity_project("project.rpp", project)
+	rpp_path = os.path.splitext(fpath)[0] + '.rpp'
+	write_rpp_file_from_audacity_project(rpp_path, project)
 
 main()
 
