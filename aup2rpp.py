@@ -4,6 +4,7 @@ import uuid
 import math
 import pprint
 import os
+import html
 
 
 AU_SAMPLE_FORMAT_16 = 3
@@ -53,11 +54,13 @@ def load_au_file(au_fpath):
 
 		if encoding == AU_SAMPLE_FORMAT_16:
 			sfc = 'h'
+			ss = 2
 		elif encoding == AU_SAMPLE_FORMAT_24:
 			print("ERROR: 24-bit samples? Dunno how to read them")
 			return
 		elif encoding == AU_SAMPLE_FORMAT_FLOAT:
 			sfc = 'f'
+			ss = 4
 		else:
 			print("ERROR: I dunno this format ", encoding)
 			return
@@ -67,16 +70,16 @@ def load_au_file(au_fpath):
 		# Note: the file may be very big
 		i = 0
 		while i < ds:
-			d = f.read(4)
+			d = f.read(ss)
 			if len(d) == 0:
 				break
 			sample_data.append(struct.unpack(sfc, d)[0])
 			i += 1
 
-		ds = i
-
-	result['data_size'] = ds
 	result['encoding'] = encoding
+
+	print('    ', result)
+
 	result['sample_data'] = sample_data
 
 	return result
@@ -93,13 +96,14 @@ class WavWriter:
 		self.samples_count = 0
 
 		self.fmt_chunk_size = 2 + 2 + 4 + 4 + 2 + 2
-		self.riff_chunk_size_without_data = 4 + (8 + self.fmt_chunk_size) + 8
 
 		self.initial_fpos = f.tell()
 
-		# Leave blank header size, we'll write it once all data has been written.
+		# Leave blank header size, we'll write it once all audio has been written.
 		# Go straight to the offset where we will write samples
-		f.write(bytearray(self.riff_chunk_size_without_data))
+		riff_header_size = 8
+		riff_chunk_size_without_data = 4 + (8 + self.fmt_chunk_size) + 8 + 0
+		f.write(bytearray(riff_header_size + riff_chunk_size_without_data))
 
 		self.data_fpos = f.tell()
 
@@ -115,12 +119,16 @@ class WavWriter:
 		self.samples_count += len(sample_data)
 
 	def finalize(self):
+		assert not self.finalized
 		f = self.f
 
+		end = f.tell()
 		data_chunk_size = f.tell() - self.data_fpos
 		f.seek(self.initial_fpos)
 
 		assert data_chunk_size == (self.samples_count * self.bits_per_sample // 8)
+		# "WAVE" letters + two FourCC+size headers and their chunk size.
+		# Does not include the size of the top-level header "RIFF"+size.
 		riff_chunk_size = 4 + (8 + self.fmt_chunk_size) + (8 + data_chunk_size)
 
 		f.write(b'RIFF')
@@ -189,9 +197,16 @@ def convert_au_files_to_wav(src_paths, dst_path):
 			if w is None:
 				w = WavWriter(f, au['sample_rate'], au['channels'], 16)
 
+			elif w.sample_rate != au['sample_rate']:
+				print("ERROR: sample rate differs in one of the .au files I wanted to concatenate into one .wav")
+				# TODO Resample, or return multiple files and split the clip...
+				break
+
 			w.append_samples(samples)
 
 		w.finalize()
+
+	return w.samples_count
 
 
 def load_audacity_project(fpath):
@@ -206,9 +221,12 @@ def load_audacity_project(fpath):
 	if not os.path.isdir(data_dir):
 		data_dir = ""
 
+	def unescape(s):
+		return html.unescape(s)
+
 	output = {
 		'rate': rate,
-		'name': name,
+		'name': unescape(name),
 		'data_dir': data_dir,
 		'tracks': []
 	}
@@ -219,8 +237,8 @@ def load_audacity_project(fpath):
 		if tag == 'wavetrack':
 
 			o_track = {
-				'name': project_item.attrib['name'],
-				'channel': project_item.attrib['channel'],
+				'name': unescape(project_item.attrib['name']),
+				'channel': int(project_item.attrib['channel']),
 				'linked': True if project_item.attrib['linked'] == '1' else False,
 				'mute': True if project_item.attrib['mute'] == '1' else False,
 				'solo': True if project_item.attrib['solo'] == '1' else False,
@@ -259,8 +277,7 @@ def load_audacity_project(fpath):
 				o_clip['envelope'] = {}
 
 				for waveblock in sequence.findall('ns:waveblock', ns):
-					# TODO I'm amazed by the seemingly unnecessary nesting of this data...
-					# taking a shortcut for now until I understand why
+
 					waveblock_start = int(waveblock.attrib['start'])
 
 					for block in waveblock:
@@ -269,78 +286,177 @@ def load_audacity_project(fpath):
 						if btag == 'simpleblockfile':
 
 							o_sequence['blocks'].append({
-								'filename': block.attrib['filename'],
+								'type': btag,
+								'start': waveblock_start,
 								'len': int(block.attrib['len']),
+								'filename': unescape(block.attrib['filename']),
 								'min': float(block.attrib['min']),
 								'max': float(block.attrib['max']),
 								'rms': float(block.attrib['rms']),
+							})
+
+						elif btag == 'pcmaliasblockfile':
+
+							o_sequence['blocks'].append({
 								'type': btag,
-								'start': waveblock_start
+								'start': waveblock_start,
+								'len': int(block.attrib['aliaslen']),
+								'file_start': int(block.attrib['aliasstart']),
+								'filename': unescape(block.attrib['aliasfile']),
+								'summary_file': block.attrib['summaryfile'],
+								'channel': int(block.attrib['aliaschannel']),
+								'min': float(block.attrib['min']),
+								'max': float(block.attrib['max']),
+								'rms': float(block.attrib['rms'])
 							})
 
 						elif btag == 'silentblockfile':
 
 							o_sequence['blocks'].append({
-								'len': int(block.attrib['len']),
-								'type': btag
+								'type': btag,
+								'len': int(block.attrib['len'])
 							})
 
 						else:
 							print("WARNING: Unknown block type: '{0}'".format(btag))
 
-						# TODO Support alias blocks (file references)
-
 	return output
 
 
 def convert_au_files_from_audacity_project(project, target_dir):
-
-	if project['data_dir'] == "":
-		# No data
-		return
+	# This is where most of the conversion happens.
 
 	indexed_files = {}
-	for root, dirs, files in os.walk(project['data_dir']):
-		for name in files:
-			indexed_files[name] = os.path.join(root, name)
+
+	if project['data_dir'] != "":
+		# Audacity saves its media files under a nested hierarchy,
+		# I don't quite understand why since files seem to have unique names
+		for root, dirs, files in os.walk(project['data_dir']):
+			for name in files:
+				indexed_files[name] = os.path.join(root, name)
 
 	if not os.path.isdir(target_dir):
 		os.makedirs(target_dir)
 
-	for track_index, track in enumerate(project['tracks']):
+	tracks = project['tracks']
+
+	converted_tracks = []
+	project['converted_tracks'] = converted_tracks
+
+	for track_index, track in enumerate(tracks):
+
+		previous_track = None if track_index == 0 else tracks[track_index - 1]
+		next_track = None if track_index + 1 == len(tracks) else tracks[track_index + 1]
+		is_stereo_track = False
+
+		if track['channel'] == 1:
+			if previous_track is not None and previous_track['linked']:
+				# Ignore second channel of a linked stereo track,
+				# should be handled both in the previous iteration.
+				# This means a converted project may have less tracks.
+				continue
+
+		elif track['channel'] == 0 and track['linked']:
+			is_stereo_track = True
+
+		converted_track = {
+			'name': track['name'],
+			'mute': track['mute'],
+			'solo': track['solo'],
+			'rate': track['rate'],
+			'gain': track['gain'],
+			'pan': track['pan'],
+			'color_index': track['color_index'],
+		}
+
+		converted_tracks.append(converted_track)
+
+		converted_clips = []
+		converted_track['converted_clips'] = converted_clips
+
 		for clip_index, clip in enumerate(track['clips']):
 
 			sequence = clip['sequence']
-			sequence['numsamples_without_silence'] = sequence['numsamples']
 
-			dst_fname = "track{0}_clip{1}.wav".format(track_index, clip_index)
-			dst_fpath = os.path.join(target_dir, dst_fname)
+			au_fpaths = [[], []]
+			converted_numsamples = 0
+			converted_clip_start = clip['offset'] # In seconds
 
-			au_fpaths = []
+			blocks = sequence['blocks']
 
-			for block_index, block in enumerate(sequence['blocks']):
+			# A clip can be made of many different blocks.
+			# The goal is to process them in order to get one file per clip,
+			# and then possibly splitting the clip or ignoring blocks.
+			# Another fun part is joining stereo tracks,
+			# because they are saved separately
+			for block_index, block in enumerate(blocks):
 
-				if block['type'] == 'simpleblockfile':
+				btype = block['type']
+				is_last = block_index + 1 == len(blocks)
+				is_next_different = not is_last and btype != blocks[block_index + 1]['type']
+
+				if btype == 'simpleblockfile' or btype == 'pcmaliasblockfile':
+					if converted_numsamples == 0:
+						converted_clip_start = clip['offset'] + block['start'] / project['rate']
+					converted_numsamples += block['len']
+
+				if btype == 'simpleblockfile':
 					# This is mostly because I assume this rather than knowing it
 					assert block['filename'].endswith('.au')
 					src_fpath = indexed_files[block['filename']]
-					au_fpaths.append(src_fpath)
+					au_fpaths[0].append(src_fpath)
 
-				elif block['type'] == 'silentblockfile':
-					# Ignore
-					sequence['numsamples_without_silence'] -= block['len']
+					if is_last or is_next_different:
+						# TODO Join stereo blocks!
+
+						dst_fname = "track{0}_clip{1}.wav".format(track_index, len(converted_clips))
+						dst_fpath = os.path.join(target_dir, dst_fname)
+
+						if os.path.isfile(dst_fpath):
+							print("Overwriting ", dst_fpath)
+
+						# TODO Try to not duplicate files when the .au was re-used
+						samples_in_file = convert_au_files_to_wav(au_fpaths[0], dst_fpath)
+
+						# Check this because there is redundancy, I'm curious if that can fail
+						if samples_in_file != converted_numsamples:
+							print("WARNING: Sample count mismatch between what I found in the .aup and the actual files")
+							print("         .aup: {0}, file: {1}".format(total_samples, converted_numsamples))
+						#print("Found {0} samples in {1}".format(samples_in_file, dst_fpath))
+
+						converted_clips.append({
+							'offset': converted_clip_start,
+							'numsamples': converted_numsamples,
+							'filename': dst_fpath
+						})
+
+						au_fpaths[0].clear()
+						au_fpaths[1].clear()
+						converted_numsamples = 0
+
+				elif btype == 'pcmaliasblockfile':
+
+					if not is_last:
+						next_block = blocks[block_index + 1]
+						if next_block['type'] == 'pcmaliasblockfile':
+							if next_block['filename'] != block['filename']:
+								is_next_different = True
+
+					if is_last or is_next_different:
+						converted_clips.append({
+							'offset': converted_clip_start,
+							'numsamples': converted_numsamples,
+							'filename': block['filename'],
+							'file_start': block['file_start']
+						})
+
+						converted_numsamples = 0
+
+				elif btype == 'silentblockfile':
+					pass # Ignore
 
 				else:
-					print("WARNING: Unknown block type: '{0}'".format(block['type']))
-
-			if len(au_fpaths) > 0:
-
-				if os.path.isfile(dst_fpath):
-					print("Overwriting ", dst_fpath)
-
-				convert_au_files_to_wav(au_fpaths, dst_fpath)
-				clip['filename'] = dst_fpath
-
+					print("WARNING: Unsupported block type: '{0}'".format(btype))
 
 def write_rpp_file_from_audacity_project(fpath, project):
 
@@ -408,7 +524,7 @@ def write_rpp_file_from_audacity_project(fpath, project):
 		project_samplerate = int(project['rate'])
 		w.line('SAMPLERATE', project_samplerate, 0, 0)
 
-		for track in project['tracks']:
+		for track in project['converted_tracks']:
 
 			track_uid = uuid.uuid4()
 
@@ -421,14 +537,7 @@ def write_rpp_file_from_audacity_project(fpath, project):
 			w.line('MUTESOLO', track['mute'], track['solo'])
 			w.line('PEAKCOL', audacity_color_to_peakcol[track['color_index']])
 
-			for clip in track['clips']:
-
-				# Note: the filename at clip-level is obtained at an earlier conversion stage,
-				# because usually Audacity stores audio as blocks which are later concatenated.
-				# Reaper doesn't need this, so it's handy to take care of that before.
-
-				if 'filename' not in clip:
-					continue
+			for clip in track['converted_clips']:
 
 				w.open_block('ITEM')
 
@@ -437,12 +546,15 @@ def write_rpp_file_from_audacity_project(fpath, project):
 				w.line('IGUID', uuid.uuid4())
 				w.line('GUID', uuid.uuid4())
 				# TODO Take name from audio file
-				w.line('NAME', "")
+				w.line('NAME', os.path.basename(clip['filename']))
 
-				nsamples = clip['sequence']['numsamples_without_silence']
+				nsamples = clip['numsamples']
 				item_len_seconds = nsamples / project_samplerate
 
 				w.line('LENGTH', item_len_seconds)
+
+				if 'file_start' in clip:
+					w.line('SOFFS', clip['file_start'] / project_samplerate)
 				
 				w.open_block('SOURCE ' + get_file_tag(clip['filename']))
 				w.line('FILE', clip['filename'])
@@ -467,17 +579,20 @@ def write_rpp_file_from_audacity_project(fpath, project):
 
 def main():
 
-	fpath = "1287.aup"
+	fpath = "project.aup"
 
 	project = load_audacity_project(fpath)
-	#pp = pprint.PrettyPrinter(indent=4)
-	#pp.pprint(project)
+	# pp = pprint.PrettyPrinter(indent=4)
+	# pp.pprint(project)
+	# return
 
 	data_dir = os.path.splitext(fpath)[0] + '_wav_data'
 	convert_au_files_from_audacity_project(project, data_dir)
 
 	rpp_path = os.path.splitext(fpath)[0] + '.rpp'
 	write_rpp_file_from_audacity_project(rpp_path, project)
+
+	print("Done")
 
 main()
 
