@@ -356,10 +356,6 @@ def load_audacity_project(fpath):
 
 				o_clip['sequence'] = o_sequence
 
-				# TODO Envelopes
-				envelope = waveclip.findall('ns:envelope', ns)[0]
-				o_clip['envelope'] = {}
-
 				for waveblock in sequence.findall('ns:waveblock', ns):
 
 					waveblock_start = int(waveblock.attrib['start'])
@@ -404,6 +400,18 @@ def load_audacity_project(fpath):
 						else:
 							print("WARNING: Unknown block type: '{0}'".format(btag))
 
+				envelope = waveclip.findall('ns:envelope', ns)[0]
+				points = []
+				for point in envelope.findall('ns:controlpoint', ns):
+					points.append({
+						't': float(point.attrib['t']),
+						'val': float(point.attrib['val'])
+					})
+
+				o_clip['envelope'] = {
+					'points': points
+				}
+
 	return output
 
 
@@ -424,6 +432,7 @@ def convert_au_files_from_audacity_project(project, target_dir):
 
 	tracks = project['tracks']
 
+	# TODO Eventually just make an entirely new project dictionary rather than modifying the input one
 	converted_tracks = []
 	project['converted_tracks'] = converted_tracks
 
@@ -476,6 +485,23 @@ def convert_au_files_from_audacity_project(project, target_dir):
 					# Okayyy
 					clip2 = None
 
+			# Convert clip-wise envelopes into a track-wise one
+			if len(clip['envelope']['points']) > 0:
+
+				if 'envelope' not in converted_track:
+					converted_envelope = { 'points': [] }
+					converted_track['envelope'] = converted_envelope
+				else:
+					converted_envelope = converted_track['envelope']
+
+				# Note: points will be sorted once we have gone through all clips
+				points = clip['envelope']['points']
+				for p in points:
+					converted_envelope['points'].append({
+						't': p['t'],
+						'val': p['val']
+					})
+
 			# A clip can be made of many different blocks.
 			# The goal is to process them in order to get one file per clip,
 			# and then possibly splitting the clip or ignoring blocks.
@@ -520,7 +546,9 @@ def convert_au_files_from_audacity_project(project, target_dir):
 						if os.path.isfile(dst_fpath):
 							print("Overwriting ", dst_fpath)
 
-						# TODO Try to not duplicate files when the .au was re-used
+						# TODO Try to not duplicate files when the .au was re-used.
+						# We could do this by hashing au_fpaths, and if it's the same then use existing result
+
 						samples_in_file = convert_au_files_to_wav(au_fpaths, dst_fpath)
 
 						# Check this because there is redundancy, I'm curious if that can fail
@@ -562,6 +590,12 @@ def convert_au_files_from_audacity_project(project, target_dir):
 
 				else:
 					print("WARNING: Unsupported block type: '{0}'".format(btype))
+
+		# Reorder envelope points by time
+		if 'envelope' in converted_track:
+			envelope = converted_track['envelope']
+			envelope['points'] = sorted(envelope['points'], key=lambda x: x['t'])
+
 
 def write_rpp_file_from_audacity_project(fpath, project):
 
@@ -641,6 +675,14 @@ def write_rpp_file_from_audacity_project(fpath, project):
 			w.line('NCHAN', 2)
 			w.line('MUTESOLO', track['mute'], track['solo'])
 			w.line('PEAKCOL', audacity_color_to_peakcol[track['color_index']])
+
+			if 'envelope' in track:
+				w.open_block('VOLENV2')
+
+				for point in track['envelope']['points']:
+					w.line('PT', point['t'], point['val'])
+
+				w.close_block()
 
 			for clip in track['converted_clips']:
 
