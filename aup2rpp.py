@@ -107,16 +107,61 @@ class WavWriter:
 
 		self.data_fpos = f.tell()
 
-	def append_samples(self, sample_data):
+	def append_multichannel_samples(self, sample_data_per_channel):
 		assert not self.finalized
+		assert self.channels == len(sample_data_per_channel)
+
+		nchannels = self.channels
+
+		if nchannels == 1:
+			# We can take a shortcut
+			interleaved_sample_data = sample_data_per_channel[0]
+			max_sample_count = len(interleaved_sample_data)
+
+		else:
+			# Get max channel length
+			max_sample_count = 0
+			for sample_data in sample_data_per_channel:
+				if len(sample_data) > max_sample_count:
+					if max_sample_count != 0:
+						# Ew, we had to adjust maximum twice
+						print("WARNING: appending multichannel sample data with different amount of samples!")
+					max_sample_count = len(sample_data)
+
+			# Make sure all channels have the same size
+			for sample_data in sample_data_per_channel:
+				if len(sample_data) > max_sample_count:
+					# Damn, where is resize(n)?
+					del sample_data[-(len(sample_data) - max_sample_count):]
+				else:
+					while len(sample_data) < max_sample_count:
+						sample_data.append(0)
+
+			# Interleave
+			interleaved_sample_data = [0] * (max_sample_count * nchannels)
+			for channel, sample_data in enumerate(sample_data_per_channel):
+				i = channel
+				for v in sample_data:
+					interleaved_sample_data[i] = v
+					i += nchannels
+
+		self.append_interleaved_samples(interleaved_sample_data)
+
+	def append_interleaved_samples(self, sample_data):
+		assert not self.finalized
+
+		nsamples = len(sample_data) // self.channels
+		assert nsamples * self.channels == len(sample_data)
 		
 		sfc = 'h'
 		if self.bits_per_sample == 32:
 			sfc = 'i'
-		for v in sample_data:
-			self.f.write(struct.pack(sfc, v))
 
-		self.samples_count += len(sample_data)
+		f = self.f
+		for v in sample_data:
+			f.write(struct.pack(sfc, v))
+
+		self.samples_count += nsamples
 
 	def finalize(self):
 		assert not self.finalized
@@ -126,7 +171,7 @@ class WavWriter:
 		data_chunk_size = f.tell() - self.data_fpos
 		f.seek(self.initial_fpos)
 
-		assert data_chunk_size == (self.samples_count * self.bits_per_sample // 8)
+		assert data_chunk_size == (self.samples_count * self.channels * self.bits_per_sample // 8)
 		# "WAVE" letters + two FourCC+size headers and their chunk size.
 		# Does not include the size of the top-level header "RIFF"+size.
 		riff_chunk_size = 4 + (8 + self.fmt_chunk_size) + (8 + data_chunk_size)
@@ -176,37 +221,76 @@ class WavWriter:
 # 		w.finalize()
 
 
-def convert_au_files_to_wav(src_paths, dst_path):
-	if len(src_paths) == 0:
+def convert_au_files_to_wav(src_paths_by_channel, dst_path):
+	if len(src_paths_by_channel) == 0:
 		return
-	print("Converting blocks ", src_paths)
+	
+	# Eliminate channels with no blocks
+	temp = []
+	for c in src_paths_by_channel:
+		if len(c) != 0:
+			temp.append(c)
+	src_paths_by_channel = temp
+
+	print("Converting blocks ", src_paths_by_channel)
 	# Concatenate a bunch of .au block files into a single WAV file
 	with open(dst_path, 'wb') as f:
 		w = None
-		for src_path in src_paths:
 
-			au = load_au_file(src_path)
+		nchannels = len(src_paths_by_channel)
 
-			samples = au['sample_data']
+		# For each block
+		for block_index in range(len(src_paths_by_channel[0])):
+			samples_by_channel = []
 
-			if au['encoding'] == AU_SAMPLE_FORMAT_FLOAT:
-				for i, v in enumerate(samples):
-					# We want 16-bit PCM
-					samples[i] = int(v * 32767.0)
+			# Process each corrsponding channel for that block
+			for channel in range(nchannels):
+				src_paths = src_paths_by_channel[channel]
 
-			if w is None:
-				w = WavWriter(f, au['sample_rate'], au['channels'], 16)
+				if block_index >= len(src_paths):
+					# That block doesn't have data on each channel...
+					samples_by_channel.append([])
+					continue
 
-			elif w.sample_rate != au['sample_rate']:
-				print("ERROR: sample rate differs in one of the .au files I wanted to concatenate into one .wav")
-				# TODO Resample, or return multiple files and split the clip...
-				break
+				au = load_au_file(src_paths[block_index])
+				samples = au['sample_data']
 
-			w.append_samples(samples)
+				if au['channels'] != 1:
+					# TODO Deal with this eventually...
+					# As far as I've seen, Audacity actually saves stereo blocks as separate mono .au files. WHY??
+					print("ERROR: I didn't expect .au files to have 2 channels "
+						  "(at least my experience so far has shown they were always mono)")
+					return 0
+
+				# Make sure it ends up in the encoding we want
+				if au['encoding'] == AU_SAMPLE_FORMAT_FLOAT:
+					for i, v in enumerate(samples):
+						# We want 16-bit PCM
+						samples[i] = int(v * 32767.0)
+				elif au['encoding'] == AU_SAMPLE_FORMAT_24:
+					print("ERROR: 24 bits not supported")
+					return
+				elif au['encoding'] == AU_SAMPLE_FORMAT_16:
+					pass # Already OK
+				else:
+					print("ERROR: Unknown .au encoding: ", au['encoding'])
+					return 0
+
+				if w is None:
+					w = WavWriter(f, au['sample_rate'], nchannels, 16)
+
+				elif w.sample_rate != au['sample_rate']:
+					print("ERROR: sample rate differs in one of the .au files I wanted to concatenate into one .wav")
+					# TODO Resample, or return multiple files and split the clip...
+					break
+
+				samples_by_channel.append(samples)
+
+			w.append_multichannel_samples(samples_by_channel)
 
 		w.finalize()
 
-	return w.samples_count
+	return 0 if w is None else w.samples_count
 
 
 def load_audacity_project(fpath):
@@ -384,6 +468,14 @@ def convert_au_files_from_audacity_project(project, target_dir):
 
 			blocks = sequence['blocks']
 
+			clip2 = None
+			if is_stereo_track:
+				clip2 = next_track['clips'][clip_index]
+				if clip2['offset'] != clip['offset']:
+					print("WARNING: Stereo track has non-aligned clips??")
+					# Okayyy
+					clip2 = None
+
 			# A clip can be made of many different blocks.
 			# The goal is to process them in order to get one file per clip,
 			# and then possibly splitting the clip or ignoring blocks.
@@ -403,11 +495,24 @@ def convert_au_files_from_audacity_project(project, target_dir):
 				if btype == 'simpleblockfile':
 					# This is mostly because I assume this rather than knowing it
 					assert block['filename'].endswith('.au')
-					src_fpath = indexed_files[block['filename']]
-					au_fpaths[0].append(src_fpath)
+
+					block2 = None
+					if is_stereo_track and clip2 is not None:
+						for b in clip2['sequence']['blocks']:
+							if b['start'] == block['start'] and b['len'] == block['len']:
+								block2 = b
+								break
+
+					if block2 is not None:
+						src_fpath = indexed_files[block['filename']]
+						au_fpaths[0].append(src_fpath)
+						src_fpath2 = indexed_files[block2['filename']]
+						au_fpaths[1].append(src_fpath2)
+					else:
+						src_fpath = indexed_files[block['filename']]
+						au_fpaths[0].append(src_fpath)
 
 					if is_last or is_next_different:
-						# TODO Join stereo blocks!
 
 						dst_fname = "track{0}_clip{1}.wav".format(track_index, len(converted_clips))
 						dst_fpath = os.path.join(target_dir, dst_fname)
@@ -416,13 +521,12 @@ def convert_au_files_from_audacity_project(project, target_dir):
 							print("Overwriting ", dst_fpath)
 
 						# TODO Try to not duplicate files when the .au was re-used
-						samples_in_file = convert_au_files_to_wav(au_fpaths[0], dst_fpath)
+						samples_in_file = convert_au_files_to_wav(au_fpaths, dst_fpath)
 
 						# Check this because there is redundancy, I'm curious if that can fail
 						if samples_in_file != converted_numsamples:
 							print("WARNING: Sample count mismatch between what I found in the .aup and the actual files")
 							print("         .aup: {0}, file: {1}".format(total_samples, converted_numsamples))
-						#print("Found {0} samples in {1}".format(samples_in_file, dst_fpath))
 
 						converted_clips.append({
 							'offset': converted_clip_start,
@@ -435,6 +539,7 @@ def convert_au_files_from_audacity_project(project, target_dir):
 						converted_numsamples = 0
 
 				elif btype == 'pcmaliasblockfile':
+					# We don't do anything special regarding stereo, the source file should be fine already
 
 					if not is_last:
 						next_block = blocks[block_index + 1]
