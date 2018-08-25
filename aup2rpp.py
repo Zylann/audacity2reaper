@@ -5,6 +5,7 @@ import math
 import pprint
 import os
 import html
+import argparse
 
 
 AU_SAMPLE_FORMAT_16 = 3
@@ -724,23 +725,29 @@ def write_rpp_file_from_audacity_project(fpath, project):
 		w.close_block()
 
 
-def main():
-
-	fpath = "project.aup"
-
-	project = load_audacity_project(fpath)
+def convert(aup_path):
+	project = load_audacity_project(aup_path)
 	# pp = pprint.PrettyPrinter(indent=4)
 	# pp.pprint(project)
 	# return
 
-	data_dir = os.path.splitext(fpath)[0] + '_wav_data'
+	data_dir = os.path.splitext(aup_path)[0] + '_wav_data'
 	convert_au_files_from_audacity_project(project, data_dir)
 
-	rpp_path = os.path.splitext(fpath)[0] + '.rpp'
+	rpp_path = os.path.splitext(aup_path)[0] + '.rpp'
 	write_rpp_file_from_audacity_project(rpp_path, project)
 
 	print("Done")
 
-main()
 
+if __name__ == '__main__':
+
+	parser = argparse.ArgumentParser(description='Converts Audacity projects into Reaper projects.')
+
+	parser.add_argument('audacity_project', metavar='audacity_project', type=str, 
+		help='Path to the Audacity project to convert (.aup file)')
+
+	args = parser.parse_args()
+
+	convert(args.audacity_project)
 
