@@ -693,7 +693,6 @@ def write_rpp_file_from_audacity_project(fpath, project):
 				# TODO I don't know what these UIDs are
 				w.line('IGUID', uuid.uuid4())
 				w.line('GUID', uuid.uuid4())
-				# TODO Take name from audio file
 				w.line('NAME', os.path.basename(clip['filename']))
 
 				nsamples = clip['numsamples']
