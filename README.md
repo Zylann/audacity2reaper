@@ -14,3 +14,9 @@ Why
 - I'm primarily doing this for fun, as I realized both softwares used fairly simple formats to store their data
 - It might be useful for people wanting to switch to Reaper. Maybe.
 
+
+How to use
+----------
+
+You need to install Python 3.6 or later.
+Then you can use it from the command line, for example `python aup2rpp.py myProject.aup`
