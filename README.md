@@ -18,5 +18,7 @@ Why
 How to use
 ----------
 
-You need to install Python 3.6 or later.
-Then you can use it from the command line, for example `python aup2rpp.py myProject.aup`
+You need to install Python 3.6 or later. Then you can use it from the command line, for example:
+```
+python aup2rpp.py myProject.aup
+```
