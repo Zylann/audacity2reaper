@@ -22,3 +22,5 @@ You need to install Python 3.6 or later. Then you can use it from the command li
 ```
 python aup2rpp.py myProject.aup
 ```
+
+which will save the reaper file and audio dependencies in the same directory as your .aup file.
