@@ -268,6 +268,9 @@ def convert_au_files_to_wav(src_paths_by_channel, dst_path):
 					for i, v in enumerate(samples):
 						# We want 16-bit PCM
 						samples[i] = int(v * 32767.0)
+						#clipping. 16-bit PCM doesn't support the entire range of 32-bit
+						samples[i] = min(samples[i], 32767) #too high
+						samples[i] = max(samples[i], -32767) #too low
 				elif au['encoding'] == AU_SAMPLE_FORMAT_24:
 					print("ERROR: 24 bits not supported")
 					return
